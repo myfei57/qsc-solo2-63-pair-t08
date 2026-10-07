@@ -5,7 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .enums import BagState, FlightState
+from .enums import (
+    BagState,
+    ConflictPolicy,
+    FlightState,
+    MaintenanceWindowState,
+    StaggerAction,
+    StaggerStatus,
+)
 
 
 def _clean(raw: Any) -> Any:
@@ -283,3 +290,156 @@ class AuditEntry:
             digest=str(raw.get("digest", "")),
             at=str(raw.get("at", "")),
         )
+
+
+@dataclass(frozen=True)
+class MaintenanceWindow:
+    """A reserved interval during which one chute is taken for maintenance."""
+
+    id: str
+    chute_id: str
+    start_at: str
+    end_at: str
+    state: MaintenanceWindowState = MaintenanceWindowState.REQUESTED
+    ticket: str = ""
+    plan_id: str = ""
+    opened_at: str = ""
+    completed_at: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "chute_id": self.chute_id,
+            "start_at": self.start_at,
+            "end_at": self.end_at,
+            "state": self.state.value,
+            "ticket": self.ticket,
+            "plan_id": self.plan_id,
+            "opened_at": self.opened_at,
+            "completed_at": self.completed_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "MaintenanceWindow":
+        return cls(
+            id=str(raw["id"]),
+            chute_id=str(raw.get("chute_id", "")),
+            start_at=str(raw.get("start_at", "")),
+            end_at=str(raw.get("end_at", "")),
+            state=MaintenanceWindowState(raw.get("state", MaintenanceWindowState.REQUESTED.value)),
+            ticket=str(raw.get("ticket", "")),
+            plan_id=str(raw.get("plan_id", "")),
+            opened_at=str(raw.get("opened_at", "")),
+            completed_at=str(raw.get("completed_at", "")),
+        )
+
+    def evolved(self, **changes: Any) -> "MaintenanceWindow":
+        return replace(self, **changes)
+
+
+@dataclass(frozen=True)
+class YieldPlan:
+    """The committed decision about who gives way and what it costs."""
+
+    id: str
+    window_id: str
+    chute_id: str
+    policy: ConflictPolicy
+    decided_at: str
+    affected_flights: tuple[str, ...] = ()
+    held_bags: int = 0
+    rerouted_bags: int = 0
+    clear_bags: int = 0
+    maintenance_delay: int = 0
+    schedule_delay: int = 0
+    effective_start_at: str = ""
+    resume_at: str = ""
+    tradeoff: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "window_id": self.window_id,
+            "chute_id": self.chute_id,
+            "policy": self.policy.value,
+            "decided_at": self.decided_at,
+            "affected_flights": list(self.affected_flights),
+            "held_bags": self.held_bags,
+            "rerouted_bags": self.rerouted_bags,
+            "clear_bags": self.clear_bags,
+            "maintenance_delay": self.maintenance_delay,
+            "schedule_delay": self.schedule_delay,
+            "effective_start_at": self.effective_start_at,
+            "resume_at": self.resume_at,
+            "tradeoff": self.tradeoff,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "YieldPlan":
+        return cls(
+            id=str(raw["id"]),
+            window_id=str(raw.get("window_id", "")),
+            chute_id=str(raw.get("chute_id", "")),
+            policy=ConflictPolicy(raw.get("policy", ConflictPolicy.WAIT_SCHEDULE.value)),
+            decided_at=str(raw.get("decided_at", "")),
+            affected_flights=tuple(str(item) for item in raw.get("affected_flights", ())),
+            held_bags=int(raw.get("held_bags", 0)),
+            rerouted_bags=int(raw.get("rerouted_bags", 0)),
+            clear_bags=int(raw.get("clear_bags", 0)),
+            maintenance_delay=int(raw.get("maintenance_delay", 0)),
+            schedule_delay=int(raw.get("schedule_delay", 0)),
+            effective_start_at=str(raw.get("effective_start_at", "")),
+            resume_at=str(raw.get("resume_at", "")),
+            tradeoff=str(raw.get("tradeoff", "")),
+        )
+
+    def evolved(self, **changes: Any) -> "YieldPlan":
+        return replace(self, **changes)
+
+
+@dataclass(frozen=True)
+class StaggerEntry:
+    """One bag's time stamped movement in the staggered plan, fully auditable."""
+
+    sequence: int
+    window_id: str
+    bag_id: str
+    flight_id: str
+    action: StaggerAction
+    status: StaggerStatus = StaggerStatus.PLANNED
+    from_chute: str = ""
+    to_chute: str = ""
+    planned_at: str = ""
+    done_at: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "sequence": self.sequence,
+            "window_id": self.window_id,
+            "bag_id": self.bag_id,
+            "flight_id": self.flight_id,
+            "action": self.action.value,
+            "status": self.status.value,
+            "from_chute": self.from_chute,
+            "to_chute": self.to_chute,
+            "planned_at": self.planned_at,
+            "done_at": self.done_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "StaggerEntry":
+        return cls(
+            sequence=int(raw.get("sequence", 0)),
+            window_id=str(raw.get("window_id", "")),
+            bag_id=str(raw.get("bag_id", "")),
+            flight_id=str(raw.get("flight_id", "")),
+            action=StaggerAction(raw.get("action", StaggerAction.HOLD.value)),
+            status=StaggerStatus(raw.get("status", StaggerStatus.PLANNED.value)),
+            from_chute=str(raw.get("from_chute", "")),
+            to_chute=str(raw.get("to_chute", "")),
+            planned_at=str(raw.get("planned_at", "")),
+            done_at=str(raw.get("done_at", "")),
+        )
+
+    def evolved(self, **changes: Any) -> "StaggerEntry":
+        return replace(self, **changes)

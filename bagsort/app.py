@@ -21,6 +21,8 @@ from bagsort.flight.mapping import BagMapping
 from bagsort.flight.schedule import ScheduleBoard
 from bagsort.ids import IdFactory
 from bagsort.inject.injector import Injector
+from bagsort.maintenance.planner import MaintenancePlanner
+from bagsort.maintenance.windows import MaintenanceBoard
 from bagsort.model.entities import Bag, Flight, Reading, SortRecord
 from bagsort.model.errors import unknown_bag
 from bagsort.ns.chutes import ChuteRegistry
@@ -67,6 +69,8 @@ class Plant:
     recheck: RecheckQueue
     belt: Belt
     quota: QuotaBook
+    maintenance: MaintenanceBoard
+    planner: MaintenancePlanner
     audit: AuditChain
     report: PlantReport
 
@@ -105,6 +109,11 @@ class Plant:
         closer = FlightCloser(book)
         recheck = RecheckQueue(store, book, clock)
         belt = Belt(store, clock, IdFactory("cmd"))
+        maintenance = MaintenanceBoard(store, clock)
+        planner = MaintenancePlanner(store, clock, maintenance, chutes, registry)
+        gate = _MaintenanceGate(maintenance, store)
+        sorter.set_gate(maintenance)
+        desk.set_gate(gate)
 
         audit = AuditChain(store, clock, handling_line())
         audit_subscriber = _AuditSubscriber(audit)
@@ -117,6 +126,13 @@ class Plant:
             "chute.assigned",
             "belt.switched",
             "bag.remapped",
+            "maintenance.registered",
+            "maintenance.started",
+            "maintenance.completed",
+            "maintenance.cancelled",
+            "maintenance.yield_planned",
+            "maintenance.stagger_executed",
+            "maintenance.sorting_resumed",
         ):
             bus.subscribe(topic, audit_subscriber)
 
@@ -145,6 +161,8 @@ class Plant:
             recheck=recheck,
             belt=belt,
             quota=quota,
+            maintenance=maintenance,
+            planner=planner,
             audit=audit,
             report=report,
         )
@@ -246,6 +264,111 @@ class Plant:
     def verify(self) -> bool:
         return self.audit.verify()
 
+    # -- maintenance windows ----------------------------------------------
+
+    def register_maintenance(
+        self,
+        window_id: str,
+        chute_id: str,
+        start_at: str,
+        end_at: str,
+        ticket: str = "",
+    ):
+        window = self.maintenance.register(window_id, chute_id, start_at, end_at, ticket)
+        self.bus.publish(
+            "maintenance.registered",
+            window_id=window.id,
+            chute_id=window.chute_id,
+            start_at=window.start_at,
+            end_at=window.end_at,
+        )
+        return window
+
+    def plan_maintenance_yield(self, window_id: str, policy: str, **options):
+        plan = self.planner.plan_yield(window_id, policy, **options)
+        self.bus.publish(
+            "maintenance.yield_planned",
+            window_id=window_id,
+            plan_id=plan.id,
+            policy=plan.policy.value,
+        )
+        return plan
+
+    def clear_stagger_entry(self, sequence: int):
+        entry = self.planner.clear_entry(sequence)
+        self.bus.publish(
+            "maintenance.stagger_executed",
+            window_id=entry.window_id,
+            bag_id=entry.bag_id,
+            action=entry.action.value,
+            sequence=entry.sequence,
+        )
+        return entry
+
+    def clear_maintenance_chute(self, window_id: str) -> int:
+        cleared = self.planner.clear_chute(window_id)
+        self.bus.publish(
+            "maintenance.stagger_executed",
+            window_id=window_id,
+            action="clear_batch",
+            cleared=cleared,
+        )
+        return cleared
+
+    def start_maintenance(self, window_id: str):
+        window = self.planner.start_maintenance(window_id)
+        self.bus.publish(
+            "maintenance.started",
+            window_id=window.id,
+            chute_id=window.chute_id,
+        )
+        return window
+
+    def complete_maintenance(self, window_id: str):
+        window = self.planner.complete_maintenance(window_id)
+        self.bus.publish(
+            "maintenance.completed",
+            window_id=window.id,
+            chute_id=window.chute_id,
+        )
+        return window
+
+    def cancel_maintenance(self, window_id: str):
+        result = self.planner.cancel_window(window_id)
+        self.bus.publish(
+            "maintenance.cancelled",
+            window_id=window_id,
+            released=result["released"],
+        )
+        return result
+
+    def resume_sorting(self, window_id: str, as_of: str = ""):
+        result = self.planner.resume_sorting(window_id, as_of=as_of)
+        self.bus.publish(
+            "maintenance.sorting_resumed",
+            window_id=window_id,
+            released=result["released"],
+        )
+        return result
+
+
+class _MaintenanceGate:
+    """Refuses new check-ins for flights routed to an active maintenance chute."""
+
+    def __init__(self, board: MaintenanceBoard, store: Store) -> None:
+        self._board = board
+        self._store = store
+
+    def refuse_checkin_for_blocked_flight(self, flight_id: str) -> None:
+        assignment = self._store.state().assignments.get(flight_id)
+        if assignment is None:
+            return
+        if self._board.is_chute_blocked(assignment.chute_id):
+            raise ConflictError(
+                f"chute {assignment.chute_id!r} is under active maintenance; "
+                f"flight {flight_id!r} is not accepting new bags"
+            )
+
 
 class _AuditSubscriber:
     """Turns published operations into linked audit entries."""
@@ -259,6 +382,13 @@ class _AuditSubscriber:
         "chute.assigned": ("chute_assign", "chute"),
         "belt.switched": ("belt_switch", "belt"),
         "bag.remapped": ("remap", "checkin"),
+        "maintenance.registered": ("maintenance_register", "chute"),
+        "maintenance.started": ("maintenance_start", "chute"),
+        "maintenance.completed": ("maintenance_complete", "chute"),
+        "maintenance.cancelled": ("maintenance_cancel", "chute"),
+        "maintenance.yield_planned": ("maintenance_yield_plan", "sorter"),
+        "maintenance.stagger_executed": ("maintenance_stagger", "sorter"),
+        "maintenance.sorting_resumed": ("maintenance_resume", "sorter"),
     }
 
     def __init__(self, audit: AuditChain) -> None:
@@ -270,7 +400,8 @@ class _AuditSubscriber:
             raise ConflictError(f"no audit mapping for topic {event.topic!r}")
         kind, stage = mapping
         subject = str(
-            event.payload.get("bag_id")
+            event.payload.get("window_id")
+            or event.payload.get("bag_id")
             or event.payload.get("flight_id")
             or event.payload.get("carousel")
             or ""
@@ -278,6 +409,6 @@ class _AuditSubscriber:
         detail = {
             key: value
             for key, value in event.payload.items()
-            if key not in {"bag_id", "flight_id"}
+            if key not in {"bag_id", "flight_id", "window_id"}
         }
         self._audit.record(kind, subject, stage, detail)

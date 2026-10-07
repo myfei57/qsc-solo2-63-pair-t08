@@ -16,9 +16,12 @@ from .entities import (
     ChuteAssignment,
     Flight,
     LoadRecord,
+    MaintenanceWindow,
     Sequence,
     SortRecord,
+    StaggerEntry,
     TransferCommand,
+    YieldPlan,
 )
 from bagsort.errors import ValidationError
 
@@ -42,6 +45,9 @@ class State:
     belt_carousel: str = ""
     belt_batch: int = 0
     belt_on_carousel: list[str] = field(default_factory=list)
+    maintenance_windows: dict[str, MaintenanceWindow] = field(default_factory=dict)
+    yield_plans: dict[str, YieldPlan] = field(default_factory=dict)
+    stagger_entries: list[StaggerEntry] = field(default_factory=list)
 
     def copy(self) -> "State":
         return State(
@@ -60,6 +66,9 @@ class State:
             belt_carousel=self.belt_carousel,
             belt_batch=self.belt_batch,
             belt_on_carousel=list(self.belt_on_carousel),
+            maintenance_windows=dict(self.maintenance_windows),
+            yield_plans=dict(self.yield_plans),
+            stagger_entries=list(self.stagger_entries),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -83,6 +92,12 @@ class State:
                 "batch": self.belt_batch,
                 "on_carousel": list(self.belt_on_carousel),
             },
+            "maintenance_windows": {
+                key: value.as_dict()
+                for key, value in sorted(self.maintenance_windows.items())
+            },
+            "yield_plans": {key: value.as_dict() for key, value in sorted(self.yield_plans.items())},
+            "stagger_entries": [entry.as_dict() for entry in self.stagger_entries],
         }
 
 def apply_entry(state: State, kind: str, payload: dict[str, Any]) -> None:
@@ -153,6 +168,24 @@ def apply_entry(state: State, kind: str, payload: dict[str, Any]) -> None:
         state.belt_on_carousel = []
         state.belt_carousel = str(payload.get("carousel", state.belt_carousel))
         state.belt_batch = int(payload.get("batch", state.belt_batch))
+    elif kind == "maintenance.put":
+        window = MaintenanceWindow.from_dict(payload["window"])
+        state.maintenance_windows[window.id] = window
+    elif kind == "yieldplan.put":
+        plan = YieldPlan.from_dict(payload["plan"])
+        state.yield_plans[plan.id] = plan
+    elif kind == "stagger.put":
+        entry = StaggerEntry.from_dict(payload["entry"])
+        state.stagger_entries = [
+            item for item in state.stagger_entries if item.sequence != entry.sequence
+        ]
+        state.stagger_entries.append(entry)
+        state.stagger_entries.sort(key=lambda item: item.sequence)
+    elif kind == "stagger.clear_for":
+        window_id = str(payload["window_id"])
+        state.stagger_entries = [
+            item for item in state.stagger_entries if item.window_id != window_id
+        ]
     else:  # pragma: no cover - guards against a typo in a new command kind
         raise ValidationError(f"unknown journal command {kind!r}")
 

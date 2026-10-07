@@ -30,6 +30,7 @@ class Sorter:
         chutes: ChuteAssigner,
         clock: Clock,
         verdict: VerdictTracker | None = None,
+        gate: object | None = None,
     ) -> None:
         self._store = store
         self._mapping = mapping
@@ -37,6 +38,12 @@ class Sorter:
         self._clock = clock
         self._verdict = verdict or VerdictTracker()
         self._log = SortLog(store)
+        self._gate = gate
+
+    def set_gate(self, gate: object) -> None:
+        """Attach the maintenance gate once the board is wired."""
+
+        self._gate = gate
 
     @property
     def log(self) -> SortLog:
@@ -55,9 +62,17 @@ class Sorter:
     def dispatch(self, bag: Bag, reading: Reading) -> SortRecord:
         if not reading.committed:
             raise ConflictError(f"barcode read for {bag.barcode!r} is not committed")
+        if bag.state is BagState.HELD:
+            raise ConflictError(
+                f"bag {bag.id!r} is held for a maintenance stagger window"
+            )
         if self._log.was_executed(bag.id):
             raise ConflictError(f"bag {bag.id!r} has already been sorted")
         detail = self.route(bag.id)
+        if self._gate is not None and self._gate.is_chute_blocked(detail.chute_id):
+            raise ConflictError(
+                f"chute {detail.chute_id!r} is under active maintenance; sorting is paused"
+            )
         record = SortRecord(
             bag_id=bag.id,
             flight_id=detail.flight_id,

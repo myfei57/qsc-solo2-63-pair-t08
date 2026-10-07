@@ -8,7 +8,7 @@ from bagsort.model.validate import validate_flight
 from bagsort.reporting import csv_export
 from bagsort.sequence.allocator import preview
 from bagsort.store.replay import replay
-from .http import Request, Response, csv_response, json_response, text_response
+from .http import Request, Response, csv_response, error_response, json_response, text_response
 from .routes import route_table
 from .version import version_info
 
@@ -778,3 +778,103 @@ def handle_export_sort(server, request: Request) -> Response:
 def handle_export_loads(server, request: Request) -> Response:
     records = _plant(server).belt.loads()
     return csv_response(csv_export.render(csv_export.LOAD_COLUMNS, csv_export.load_rows(records)))
+
+
+# ---------------------------------------------------------------------------
+# maintenance windows and sorting stagger
+# ---------------------------------------------------------------------------
+
+
+def handle_maintenance_list(server, request: Request) -> Response:
+    return json_response(
+        [window.as_dict() for window in _plant(server).maintenance.list()]
+    )
+
+
+def handle_maintenance_register(server, request: Request) -> Response:
+    plant = _plant(server)
+    window = plant.register_maintenance(
+        request.required("window_id"),
+        request.required("chute_id"),
+        request.required("start_at"),
+        request.required("end_at"),
+        request.str_field("ticket"),
+    )
+    return json_response(window.as_dict(), status=201)
+
+
+def handle_maintenance_blocked(server, request: Request) -> Response:
+    plant = _plant(server)
+    return json_response({"blocked_chutes": plant.maintenance.blocked_chutes()})
+
+
+def handle_maintenance_get(server, request: Request) -> Response:
+    return json_response(_plant(server).maintenance.get(request.param("id")).as_dict())
+
+
+def handle_maintenance_plan(server, request: Request) -> Response:
+    plant = _plant(server)
+    options = {
+        "reroute_unsorted": request.bool_field("reroute_unsorted", True),
+        "stagger_interval": request.int_field("stagger_interval", 30),
+        "stagger_batch": request.int_field("stagger_batch", 10),
+        "preferred_alternate": request.str_field("preferred_alternate"),
+    }
+    plan = plant.plan_maintenance_yield(
+        request.param("id"), request.required("policy"), **options
+    )
+    return json_response(plan.as_dict(), status=201)
+
+
+def handle_maintenance_plan_get(server, request: Request) -> Response:
+    return json_response(_plant(server).planner.plan_for(request.param("id")).as_dict())
+
+
+def handle_yield_plans(server, request: Request) -> Response:
+    return json_response([plan.as_dict() for plan in _plant(server).planner.plans()])
+
+
+def handle_maintenance_stagger(server, request: Request) -> Response:
+    entries = _plant(server).planner.entries_for(request.param("id"))
+    return json_response([entry.as_dict() for entry in entries])
+
+
+def handle_stagger_entries(server, request: Request) -> Response:
+    entries = _plant(server).planner.entries()
+    return json_response([entry.as_dict() for entry in entries])
+
+
+def handle_maintenance_clear(server, request: Request) -> Response:
+    cleared = _plant(server).clear_maintenance_chute(request.param("id"))
+    return json_response({"window_id": request.param("id"), "cleared": cleared})
+
+
+def handle_stagger_clear_one(server, request: Request) -> Response:
+    try:
+        sequence = int(request.param("seq"))
+    except ValueError:
+        return error_response(400, "seq must be an integer")
+    entry = _plant(server).clear_stagger_entry(sequence)
+    return json_response(entry.as_dict())
+
+
+def handle_maintenance_start(server, request: Request) -> Response:
+    return json_response(_plant(server).start_maintenance(request.param("id")).as_dict())
+
+
+def handle_maintenance_complete(server, request: Request) -> Response:
+    return json_response(_plant(server).complete_maintenance(request.param("id")).as_dict())
+
+
+def handle_maintenance_cancel(server, request: Request) -> Response:
+    result = _plant(server).cancel_maintenance(request.param("id"))
+    return json_response(
+        {"window": result["window"].as_dict(), "released": result["released"]}
+    )
+
+
+def handle_maintenance_resume(server, request: Request) -> Response:
+    payload = _plant(server).resume_sorting(
+        request.param("id"), request.str_field("as_of")
+    )
+    return json_response(payload)

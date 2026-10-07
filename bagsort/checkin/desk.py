@@ -45,12 +45,20 @@ class Desk:
         self._quota = quota
         self._clock = clock
         self._topology = topology
+        self._gate = None
         # The desk refuses to start if the line no longer reads before it injects.
         topology.ensure_before("checkin", "tag")
         topology.ensure_before("tag", "inject")
 
+    def set_gate(self, gate: object) -> None:
+        """Attach the maintenance gate once the board is wired."""
+
+        self._gate = gate
+
     def check_in(self, barcode: str, flight_id: str) -> Bag:
         self._book.require_open(flight_id)
+        if self._gate is not None:
+            self._gate.refuse_checkin_for_blocked_flight(flight_id)
         if not self._quota.allowed(flight_id):
             raise QuotaError(f"flight {flight_id!r} has no sorting allowance left")
         committed = self._reader.commit(self._reader.read(barcode))

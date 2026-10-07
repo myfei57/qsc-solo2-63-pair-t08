@@ -156,6 +156,22 @@ def route_table() -> list[Route]:
         Route("GET", "/api/export/audit.csv", "audit trail as CSV", "handle_export_audit"),
         Route("GET", "/api/export/sort.csv", "sort records as CSV", "handle_export_sort"),
         Route("GET", "/api/export/loads.csv", "load records as CSV", "handle_export_loads"),
+        # -- maintenance --------------------------------------------------
+        Route("GET", "/api/maintenance/windows", "list maintenance windows", "handle_maintenance_list"),
+        Route("POST", "/api/maintenance/windows", "declare a maintenance window", "handle_maintenance_register"),
+        Route("GET", "/api/maintenance/chutes", "chutes blocked by active maintenance", "handle_maintenance_blocked"),
+        Route("GET", "/api/maintenance/plans", "list committed yield plans", "handle_yield_plans"),
+        Route("GET", "/api/maintenance/stagger", "list every stagger entry", "handle_stagger_entries"),
+        Route("GET", "/api/maintenance/windows/{id}", "read one maintenance window", "handle_maintenance_get"),
+        Route("POST", "/api/maintenance/windows/{id}/plan", "decide who gives way", "handle_maintenance_plan"),
+        Route("GET", "/api/maintenance/windows/{id}/plan", "read the window yield plan", "handle_maintenance_plan_get"),
+        Route("GET", "/api/maintenance/windows/{id}/stagger", "per-bag stagger entries for one window", "handle_maintenance_stagger"),
+        Route("POST", "/api/maintenance/windows/{id}/clear", "clear the chute of sorted bags", "handle_maintenance_clear"),
+        Route("POST", "/api/maintenance/windows/{id}/start", "open the maintenance window", "handle_maintenance_start"),
+        Route("POST", "/api/maintenance/windows/{id}/complete", "finish maintenance", "handle_maintenance_complete"),
+        Route("POST", "/api/maintenance/windows/{id}/cancel", "cancel a not-started window", "handle_maintenance_cancel"),
+        Route("POST", "/api/maintenance/windows/{id}/resume", "resume sorting after maintenance", "handle_maintenance_resume"),
+        Route("POST", "/api/maintenance/stagger/{seq}/clear", "execute one stagger clear entry", "handle_stagger_clear_one"),
     ]
 
 
