@@ -7,6 +7,7 @@ lets the CLI drive the same operations the HTTP API exposes.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from bagsort.audit.chain import AuditChain
@@ -38,6 +39,12 @@ from bagsort.chute.assigner import ChuteAssigner
 from bagsort.chute.history import AssignmentHistory
 from bagsort.console.metrics import Metrics
 from bagsort.console.telemetry import Telemetry
+from bagsort.ids import IdFactory
+from bagsort.maintenance.ledger import ArtifactLedger
+from bagsort.maintenance.planner import MaintenancePlanner
+from bagsort.maintenance.scheduler import Scheduler
+from bagsort.model.entities import Bag, Flight, Reading, SortRecord
+from bagsort.model.enums import MaintenanceState, YieldPolicy
 
 DEFAULT_TERMINAL = "T1"
 
@@ -69,6 +76,9 @@ class Plant:
     quota: QuotaBook
     audit: AuditChain
     report: PlantReport
+    scheduler: Scheduler
+    planner: MaintenancePlanner
+    ledger: ArtifactLedger
 
     @property
     def topology(self):
@@ -106,6 +116,13 @@ class Plant:
         recheck = RecheckQueue(store, book, clock)
         belt = Belt(store, clock, IdFactory("cmd"))
 
+        ledger_root = os.path.join(os.path.dirname(store.path), "maintenance")
+        ledger = ArtifactLedger(ledger_root)
+        scheduler = Scheduler(store, clock)
+        planner = MaintenancePlanner(
+            store, clock, scheduler, chutes, registry, belt, ledger
+        )
+
         audit = AuditChain(store, clock, handling_line())
         audit_subscriber = _AuditSubscriber(audit)
         for topic in (
@@ -117,6 +134,13 @@ class Plant:
             "chute.assigned",
             "belt.switched",
             "bag.remapped",
+            "sortjob.scheduled",
+            "maintenance.declared",
+            "maintenance.resolved",
+            "maintenance.armed",
+            "maintenance.started",
+            "maintenance.finished",
+            "maintenance.cancelled",
         ):
             bus.subscribe(topic, audit_subscriber)
 
@@ -147,6 +171,9 @@ class Plant:
             quota=quota,
             audit=audit,
             report=report,
+            scheduler=scheduler,
+            planner=planner,
+            ledger=ledger,
         )
 
     # -- operator operations ----------------------------------------------
@@ -188,6 +215,7 @@ class Plant:
         return bag
 
     def push_bag(self, bag_id: str, chute_id: str) -> SortRecord:
+        self._require_chute_sorting(chute_id)
         bag = self.bag(bag_id)
         record = self.injector.push(bag, chute_id)
         self.bus.publish("bag.sorted", bag_id=bag.id, chute_id=record.chute_id)
@@ -243,6 +271,119 @@ class Plant:
     def set_quota(self, flight_id: str, limit: int) -> int:
         return self.quota.set_limit(flight_id, limit)
 
+    # -- sorting schedule ---------------------------------------------------
+
+    def _require_chute_sorting(self, chute_id: str) -> None:
+        """Reject dispatch into an armed/in-progress maintenance window."""
+
+        from bagsort.maintenance.windows import overlaps
+
+        for request in self.planner.list_maintenance(chute_id):
+            if request.state is MaintenanceState.IN_PROGRESS:
+                raise ConflictError(
+                    f"chute {chute_id} is under maintenance {request.id!r}"
+                )
+            if request.state in (
+                MaintenanceState.APPROVED,
+                MaintenanceState.ARMED,
+            ) and overlaps(
+                (request.start_at, request.end_at),
+                (self.clock.now_iso(), self.clock.now_iso()),
+            ):
+                raise ConflictError(
+                    f"chute {chute_id} has an approved maintenance window "
+                    f"{request.id!r}; sorting must yield"
+                )
+
+    def schedule_sort(
+        self,
+        job_id: str,
+        chute_id: str,
+        start_at: str,
+        end_at: str,
+        note: str = "",
+    ):
+        job = self.scheduler.schedule(job_id, chute_id, start_at, end_at, note=note)
+        self.bus.publish("sortjob.scheduled", job_id=job.id, chute_id=job.chute_id)
+        return job
+
+    def start_sort(self, job_id: str):
+        return self.scheduler.start(job_id)
+
+    def pause_sort(self, job_id: str):
+        return self.scheduler.pause(job_id)
+
+    def resume_sort(self, job_id: str):
+        return self.scheduler.resume(job_id)
+
+    def complete_sort(self, job_id: str):
+        return self.scheduler.complete(job_id)
+
+    def cancel_sort(self, job_id: str):
+        return self.scheduler.cancel(job_id)
+
+    def list_sort_jobs(self, chute_id: str = ""):
+        return self.scheduler.list_jobs(chute_id)
+
+    # -- maintenance --------------------------------------------------------
+
+    def declare_maintenance(
+        self, chute_id: str, start_at: str, end_at: str, reason: str = ""
+    ):
+        preview = self.planner.declare(chute_id, start_at, end_at, reason)
+        self.bus.publish(
+            "maintenance.declared",
+            maintenance_id=preview.request.id,
+            chute_id=chute_id,
+        )
+        return preview
+
+    def resolve_maintenance(self, maintenance_id: str, policy: str):
+        ruling = YieldPolicy(policy)
+        decision = self.planner.resolve(maintenance_id, ruling)
+        self.bus.publish(
+            "maintenance.resolved",
+            maintenance_id=maintenance_id,
+            policy=ruling.value,
+        )
+        return decision
+
+    def arm_maintenance(self, maintenance_id: str):
+        result = self.planner.arm(maintenance_id)
+        self.bus.publish(
+            "maintenance.armed",
+            maintenance_id=maintenance_id,
+            clear=result.barrier.clear,
+        )
+        return result
+
+    def start_maintenance(self, maintenance_id: str):
+        request = self.planner.start(maintenance_id)
+        self.bus.publish(
+            "maintenance.started", maintenance_id=maintenance_id
+        )
+        return request
+
+    def complete_maintenance(self, maintenance_id: str):
+        recovery = self.planner.complete(maintenance_id)
+        self.bus.publish(
+            "maintenance.finished", maintenance_id=maintenance_id
+        )
+        return recovery
+
+    def cancel_maintenance(self, maintenance_id: str):
+        recovery = self.planner.cancel(maintenance_id)
+        self.bus.publish(
+            "maintenance.cancelled", maintenance_id=maintenance_id
+        )
+        return recovery
+
+    def list_maintenance(self, chute_id: str = "", state: MaintenanceState | None = None):
+        return self.planner.list_maintenance(chute_id, state)
+
+    def maintenance_shifts(self, maintenance_id: str = ""):
+        return self.planner.shifts(maintenance_id)
+
     def verify(self) -> bool:
         return self.audit.verify()
 
@@ -259,6 +400,13 @@ class _AuditSubscriber:
         "chute.assigned": ("chute_assign", "chute"),
         "belt.switched": ("belt_switch", "belt"),
         "bag.remapped": ("remap", "checkin"),
+        "sortjob.scheduled": ("sort_schedule", "sorter"),
+        "maintenance.declared": ("maintenance_declare", "sorter"),
+        "maintenance.resolved": ("maintenance_resolve", "sorter"),
+        "maintenance.armed": ("maintenance_arm", "chute"),
+        "maintenance.started": ("maintenance_start", "chute"),
+        "maintenance.finished": ("maintenance_finish", "chute"),
+        "maintenance.cancelled": ("maintenance_cancel", "chute"),
     }
 
     def __init__(self, audit: AuditChain) -> None:
@@ -272,6 +420,8 @@ class _AuditSubscriber:
         subject = str(
             event.payload.get("bag_id")
             or event.payload.get("flight_id")
+            or event.payload.get("maintenance_id")
+            or event.payload.get("job_id")
             or event.payload.get("carousel")
             or ""
         )

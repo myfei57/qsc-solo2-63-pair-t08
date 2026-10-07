@@ -156,6 +156,28 @@ def route_table() -> list[Route]:
         Route("GET", "/api/export/audit.csv", "audit trail as CSV", "handle_export_audit"),
         Route("GET", "/api/export/sort.csv", "sort records as CSV", "handle_export_sort"),
         Route("GET", "/api/export/loads.csv", "load records as CSV", "handle_export_loads"),
+        # -- sorting schedule ---------------------------------------------
+        Route("GET", "/api/schedule/jobs", "list sorting windows", "handle_list_sort_jobs"),
+        Route("POST", "/api/schedule/jobs", "schedule a sorting window", "handle_schedule_sort"),
+        Route("GET", "/api/schedule/jobs/{id}", "read one sorting window", "handle_get_sort_job"),
+        Route("POST", "/api/schedule/jobs/{id}/start", "start a sorting window", "handle_start_sort"),
+        Route("POST", "/api/schedule/jobs/{id}/pause", "pause a sorting window", "handle_pause_sort"),
+        Route("POST", "/api/schedule/jobs/{id}/resume", "resume a sorting window", "handle_resume_sort"),
+        Route("POST", "/api/schedule/jobs/{id}/complete", "finish a sorting window", "handle_complete_sort"),
+        Route("POST", "/api/schedule/jobs/{id}/cancel", "cancel a sorting window", "handle_cancel_sort"),
+        # -- maintenance --------------------------------------------------
+        Route("GET", "/api/maintenance", "list maintenance windows", "handle_list_maintenance"),
+        Route("POST", "/api/maintenance", "declare a maintenance window", "handle_declare_maintenance"),
+        Route("GET", "/api/maintenance/shifts", "per-bag peak-shift lines", "handle_maintenance_shifts"),
+        Route("GET", "/api/maintenance/{id}", "read one maintenance window", "handle_get_maintenance"),
+        Route("POST", "/api/maintenance/{id}/resolve", "choose wait-sort or pause-sort", "handle_resolve_maintenance"),
+        Route("POST", "/api/maintenance/{id}/arm", "yield, peak-shift and seal the barrier", "handle_arm_maintenance"),
+        Route("POST", "/api/maintenance/{id}/start", "take the chute for maintenance", "handle_start_maintenance"),
+        Route("POST", "/api/maintenance/{id}/complete", "finish maintenance and recover", "handle_complete_maintenance"),
+        Route("POST", "/api/maintenance/{id}/cancel", "cancel maintenance and recover", "handle_cancel_maintenance"),
+        Route("GET", "/api/maintenance/{id}/decision", "the recorded yield decision", "handle_maintenance_decision"),
+        Route("GET", "/api/maintenance/{id}/barrier", "the clear-barrier manifest", "handle_maintenance_barrier"),
+        Route("GET", "/api/maintenance/{id}/recovery", "the recovery report", "handle_maintenance_recovery"),
     ]
 
 

@@ -778,3 +778,135 @@ def handle_export_sort(server, request: Request) -> Response:
 def handle_export_loads(server, request: Request) -> Response:
     records = _plant(server).belt.loads()
     return csv_response(csv_export.render(csv_export.LOAD_COLUMNS, csv_export.load_rows(records)))
+
+
+# ---------------------------------------------------------------------------
+# sorting schedule
+# ---------------------------------------------------------------------------
+
+
+def handle_list_sort_jobs(server, request: Request) -> Response:
+    chute_id = request.query_str("chute")
+    jobs = _plant(server).list_sort_jobs(chute_id)
+    return json_response([job.as_dict() for job in jobs])
+
+
+def handle_schedule_sort(server, request: Request) -> Response:
+    plant = _plant(server)
+    job = plant.schedule_sort(
+        request.required("job_id"),
+        request.required("chute_id"),
+        request.required("start_at"),
+        request.required("end_at"),
+        note=request.str_field("note"),
+    )
+    return json_response(job.as_dict(), status=201)
+
+
+def handle_get_sort_job(server, request: Request) -> Response:
+    return json_response(_plant(server).scheduler.get(request.param("id")).as_dict())
+
+
+def handle_start_sort(server, request: Request) -> Response:
+    return json_response(_plant(server).start_sort(request.param("id")).as_dict())
+
+
+def handle_pause_sort(server, request: Request) -> Response:
+    return json_response(_plant(server).pause_sort(request.param("id")).as_dict())
+
+
+def handle_resume_sort(server, request: Request) -> Response:
+    return json_response(_plant(server).resume_sort(request.param("id")).as_dict())
+
+
+def handle_complete_sort(server, request: Request) -> Response:
+    return json_response(_plant(server).complete_sort(request.param("id")).as_dict())
+
+
+def handle_cancel_sort(server, request: Request) -> Response:
+    return json_response(_plant(server).cancel_sort(request.param("id")).as_dict())
+
+
+# ---------------------------------------------------------------------------
+# maintenance windows
+# ---------------------------------------------------------------------------
+
+
+def handle_list_maintenance(server, request: Request) -> Response:
+    chute_id = request.query_str("chute")
+    requests = _plant(server).list_maintenance(chute_id)
+    return json_response([request.as_dict() for request in requests])
+
+
+def handle_declare_maintenance(server, request: Request) -> Response:
+    preview = _plant(server).declare_maintenance(
+        request.required("chute_id"),
+        request.required("start_at"),
+        request.required("end_at"),
+        reason=request.str_field("reason"),
+    )
+    return json_response(preview.as_dict(), status=201)
+
+
+def handle_get_maintenance(server, request: Request) -> Response:
+    return json_response(_plant(server).planner.get(request.param("id")).as_dict())
+
+
+def handle_resolve_maintenance(server, request: Request) -> Response:
+    decision = _plant(server).resolve_maintenance(
+        request.param("id"), request.required("policy")
+    )
+    return json_response(decision.as_dict())
+
+
+def handle_arm_maintenance(server, request: Request) -> Response:
+    result = _plant(server).arm_maintenance(request.param("id"))
+    return json_response(result.as_dict())
+
+
+def handle_start_maintenance(server, request: Request) -> Response:
+    return json_response(_plant(server).start_maintenance(request.param("id")).as_dict())
+
+
+def handle_complete_maintenance(server, request: Request) -> Response:
+    return json_response(_plant(server).complete_maintenance(request.param("id")).as_dict())
+
+
+def handle_cancel_maintenance(server, request: Request) -> Response:
+    recovery = _plant(server).cancel_maintenance(request.param("id"))
+    payload = {"cancelled": True, "recovery": recovery.as_dict() if recovery else None}
+    return json_response(payload)
+
+
+def handle_maintenance_decision(server, request: Request) -> Response:
+    decision = _plant(server).planner.decision(request.param("id"))
+    if decision is None:
+        return json_response({"error": "no decision recorded"}, status=404)
+    return json_response(decision.as_dict())
+
+
+def handle_maintenance_barrier(server, request: Request) -> Response:
+    barrier = _plant(server).planner.barrier(request.param("id"))
+    if barrier is None:
+        return json_response({"error": "no barrier manifest"}, status=404)
+    return json_response(barrier.as_dict())
+
+
+def handle_maintenance_recovery(server, request: Request) -> Response:
+    recovery = _plant(server).planner.recovery(request.param("id"))
+    if recovery is None:
+        return json_response({"error": "no recovery report"}, status=404)
+    return json_response(recovery.as_dict())
+
+
+def handle_maintenance_shifts(server, request: Request) -> Response:
+    maintenance_id = request.query_str("maintenance")
+    bag_id = request.query_str("bag")
+    planner = _plant(server).planner
+    if bag_id:
+        shifts = planner.shifts_for_bag(bag_id)
+        if maintenance_id:
+            shifts = [shift for shift in shifts if shift.maintenance_id == maintenance_id]
+    else:
+        shifts = planner.shifts(maintenance_id)
+    return json_response([shift.as_dict() for shift in shifts])

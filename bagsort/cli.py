@@ -48,6 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--cycles", type=int, default=6, help="bags to check in")
     demo.add_argument("--persist", action="store_true", help="write a snapshot afterwards")
 
+    mdemo = commands.add_parser(
+        "maintain-demo", help="run the maintenance/scheduling scenario"
+    )
+    mdemo.add_argument("--persist", action="store_true", help="write a snapshot afterwards")
+
     commands.add_parser("report", help="print the plant report")
     commands.add_parser("status", help="print the store status")
     commands.add_parser("export", help="print audit and sort records as CSV")
@@ -57,6 +62,44 @@ def build_parser() -> argparse.ArgumentParser:
 
     reset = commands.add_parser("reset", help="clear the journal")
     reset.add_argument("--persist", action="store_true", help="write the empty snapshot")
+
+    # -- sorting schedule ---------------------------------------------------
+    schedule = commands.add_parser("schedule", help="schedule a sorting window")
+    schedule.add_argument("job_id")
+    schedule.add_argument("chute")
+    schedule.add_argument("start_at", help="UTC ISO, e.g. 2024-01-01T09:00:00Z")
+    schedule.add_argument("end_at")
+    schedule.add_argument("--note", default="")
+
+    job = commands.add_parser("job", help="operate one sorting window")
+    job.add_argument(
+        "action",
+        choices=("start", "pause", "resume", "complete", "cancel", "show"),
+    )
+    job.add_argument("job_id")
+
+    # -- maintenance --------------------------------------------------------
+    declare = commands.add_parser("maintain-declare", help="declare a maintenance window")
+    declare.add_argument("chute")
+    declare.add_argument("start_at")
+    declare.add_argument("end_at")
+    declare.add_argument("--reason", default="")
+
+    resolve = commands.add_parser("maintain-resolve", help="choose wait-sort or pause-sort")
+    resolve.add_argument("maintenance_id")
+    resolve.add_argument("policy", choices=("wait_sort", "pause_sort"))
+
+    maintain = commands.add_parser("maintain", help="drive one maintenance request")
+    maintain.add_argument(
+        "action",
+        choices=(
+            "arm", "start", "complete", "cancel", "show",
+            "decision", "barrier", "recovery", "shifts",
+        ),
+    )
+    maintain.add_argument("maintenance_id", nargs="?", default="")
+
+    commands.add_parser("maintenance-list", help="list maintenance windows")
     return parser
 
 
@@ -92,6 +135,16 @@ def _command_demo(store: Store, plant: Plant, args: argparse.Namespace) -> int:
     if args.persist:
         store.persist()
     return 0 if invariants_hold(summary) else 1
+
+
+def _command_maintain_demo(store: Store, plant: Plant, args: argparse.Namespace) -> int:
+    from .maintenance_demo import run_maintenance_demo
+
+    summary = run_maintenance_demo(plant)
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    if args.persist:
+        store.persist()
+    return 0 if summary["invariants_hold"] else 1
 
 
 def _command_report(plant: Plant) -> int:
@@ -134,6 +187,92 @@ def _command_reset(store: Store, plant: Plant, args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_schedule(store: Store, plant: Plant, args: argparse.Namespace) -> int:
+    chute_id = plant.namespace.chute_id(args.chute)
+    job = plant.schedule_sort(
+        args.job_id, chute_id, args.start_at, args.end_at, note=args.note
+    )
+    store.persist()
+    print(json.dumps(job.as_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _command_job(store: Store, plant: Plant, args: argparse.Namespace) -> int:
+    actions = {
+        "start": plant.start_sort,
+        "pause": plant.pause_sort,
+        "resume": plant.resume_sort,
+        "complete": plant.complete_sort,
+        "cancel": plant.cancel_sort,
+    }
+    if args.action == "show":
+        payload = plant.scheduler.get(args.job_id).as_dict()
+    else:
+        payload = actions[args.action](args.job_id).as_dict()
+    store.persist()
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _command_maintain_declare(
+    store: Store, plant: Plant, args: argparse.Namespace
+) -> int:
+    chute_id = plant.namespace.chute_id(args.chute)
+    preview = plant.declare_maintenance(
+        chute_id, args.start_at, args.end_at, reason=args.reason
+    )
+    store.persist()
+    print(json.dumps(preview.as_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _command_maintain_resolve(
+    store: Store, plant: Plant, args: argparse.Namespace
+) -> int:
+    decision = plant.resolve_maintenance(args.maintenance_id, args.policy)
+    store.persist()
+    print(json.dumps(decision.as_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _command_maintain(store: Store, plant: Plant, args: argparse.Namespace) -> int:
+    maintenance_id = args.maintenance_id
+    if args.action != "shifts" and not maintenance_id:
+        raise SystemExit("maintenance id is required")
+    if args.action == "show":
+        payload = plant.planner.get(maintenance_id).as_dict()
+    elif args.action == "decision":
+        decision = plant.planner.decision(maintenance_id)
+        payload = decision.as_dict() if decision else {}
+    elif args.action == "barrier":
+        barrier = plant.planner.barrier(maintenance_id)
+        payload = barrier.as_dict() if barrier else {}
+    elif args.action == "recovery":
+        recovery = plant.planner.recovery(maintenance_id)
+        payload = recovery.as_dict() if recovery else {}
+    elif args.action == "shifts":
+        shifts = plant.maintenance_shifts(maintenance_id)
+        payload = [shift.as_dict() for shift in shifts]
+    elif args.action == "arm":
+        payload = plant.arm_maintenance(maintenance_id).as_dict()
+    elif args.action == "start":
+        payload = plant.start_maintenance(maintenance_id).as_dict()
+    elif args.action == "complete":
+        payload = plant.complete_maintenance(maintenance_id).as_dict()
+    else:
+        recovery = plant.cancel_maintenance(maintenance_id)
+        payload = {"cancelled": True, "recovery": recovery.as_dict() if recovery else None}
+    store.persist()
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _command_maintenance_list(store: Store, plant: Plant, args: argparse.Namespace) -> int:
+    payload = [request.as_dict() for request in plant.list_maintenance()]
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -153,6 +292,8 @@ def main(argv: list[str] | None = None) -> int:
         return _command_serve(store, plant, args)
     if args.command == "demo":
         return _command_demo(store, plant, args)
+    if args.command == "maintain-demo":
+        return _command_maintain_demo(store, plant, args)
     if args.command == "report":
         return _command_report(plant)
     if args.command == "status":
@@ -163,5 +304,17 @@ def main(argv: list[str] | None = None) -> int:
         return _command_seed(store, plant, args)
     if args.command == "reset":
         return _command_reset(store, plant, args)
+    if args.command == "schedule":
+        return _command_schedule(store, plant, args)
+    if args.command == "job":
+        return _command_job(store, plant, args)
+    if args.command == "maintain-declare":
+        return _command_maintain_declare(store, plant, args)
+    if args.command == "maintain-resolve":
+        return _command_maintain_resolve(store, plant, args)
+    if args.command == "maintain":
+        return _command_maintain(store, plant, args)
+    if args.command == "maintenance-list":
+        return _command_maintenance_list(store, plant, args)
     parser.error(f"unknown command {args.command!r}")
     return 2
